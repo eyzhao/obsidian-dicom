@@ -115,8 +115,14 @@ export default class DicomViewerPlugin extends Plugin {
 			})
 		);
 
-		// Render `type: dicom` pointer notes as the viewer, in reading mode and
-		// in ![[embeds]].
+		// Render DICOM pointer notes as the viewer. Two mechanisms:
+		//  (1) a ```dicom code block — renders reliably in reading view, Live
+		//      Preview, and ![[embeds]]. Generated pointer notes include it.
+		//  (2) a frontmatter fallback (type: dicom) for hand-authored notes
+		//      with no code block — reading view / embeds.
+		this.registerMarkdownCodeBlockProcessor("dicom", (source, el, ctx) =>
+			this.renderDicomCodeBlock(source, el, ctx)
+		);
 		this.registerMarkdownPostProcessor((el, ctx) =>
 			this.renderDicomPointer(el, ctx)
 		);
@@ -150,19 +156,74 @@ export default class DicomViewerPlugin extends Plugin {
 	}
 
 	// ---- pointer-note rendering ----------------------------------------------
+	private previewRootOf(el: HTMLElement): HTMLElement | null {
+		return el.closest(
+			".markdown-embed-content, .markdown-preview-view, .markdown-rendered"
+		) as HTMLElement | null;
+	}
+
+	private dicomPathFromFrontmatter(
+		ctx: MarkdownPostProcessorContext
+	): string | null {
+		const fm =
+			(ctx as unknown as { frontmatter?: Record<string, unknown> })
+				.frontmatter ??
+			this.app.metadataCache.getCache(ctx.sourcePath)?.frontmatter;
+		if (!fm || fm["type"] !== "dicom" || !fm["dicom_path"]) return null;
+		return normalizePath(stripLeadingSlash(String(fm["dicom_path"])));
+	}
+
+	/** ```dicom code block → viewer. Path comes from frontmatter or the block. */
+	private renderDicomCodeBlock(
+		source: string,
+		el: HTMLElement,
+		ctx: MarkdownPostProcessorContext
+	) {
+		let path = this.dicomPathFromFrontmatter(ctx);
+		if (!path) {
+			// Allow `dicom_path: ...` or a bare path inside the block body.
+			const line = source
+				.split("\n")
+				.map((l) => l.trim())
+				.find((l) => l.length > 0);
+			if (line) {
+				const m = line.match(/^(?:dicom_path|path)\s*:\s*(.+)$/);
+				path = normalizePath(stripLeadingSlash(m ? m[1] : line));
+			}
+		}
+		if (!path) {
+			el.createDiv({
+				cls: "dicom-message",
+				text: "DICOM viewer: no dicom_path in frontmatter or block.",
+			});
+			return;
+		}
+		const root = this.previewRootOf(el);
+		if (root) root.dataset.dicomMounted = "1";
+		const isEmbed = !!el.closest(".markdown-embed");
+		const host = el.createDiv({
+			cls:
+				"dicom-render-host " +
+				(isEmbed ? "dicom-embed-host" : "dicom-fullpage-host"),
+		});
+		ctx.addChild(new DicomRenderChild(this.app, host, path, ctx.sourcePath));
+	}
+
 	private renderDicomPointer(
 		el: HTMLElement,
 		ctx: MarkdownPostProcessorContext
 	) {
-		const fm = this.app.metadataCache.getCache(ctx.sourcePath)?.frontmatter;
-		if (!fm || fm.type !== "dicom" || !fm.dicom_path) return;
+		const path = this.dicomPathFromFrontmatter(ctx);
+		if (!path) return;
 
 		// Mount one viewer per rendered document/embed; hide the markdown body.
-		const root =
-			(el.closest(
-				".markdown-embed-content, .markdown-preview-view, .markdown-rendered"
-			) as HTMLElement) || el;
+		const root = this.previewRootOf(el) || el;
 		if (root.dataset.dicomMounted) {
+			el.style.display = "none";
+			return;
+		}
+		// If a ```dicom block is present, let the code-block processor handle it.
+		if (root.querySelector(".block-language-dicom")) {
 			el.style.display = "none";
 			return;
 		}
@@ -176,10 +237,9 @@ export default class DicomViewerPlugin extends Plugin {
 		});
 		el.parentElement?.insertBefore(host, el);
 		el.style.display = "none";
-
-		const folderPath = normalizePath(stripLeadingSlash(String(fm.dicom_path)));
-		const child = new DicomRenderChild(this.app, host, folderPath);
-		ctx.addChild(child);
+		ctx.addChild(
+			new DicomRenderChild(this.app, host, path, ctx.sourcePath)
+		);
 	}
 
 	// ---- import ---------------------------------------------------------------
@@ -233,7 +293,7 @@ export default class DicomViewerPlugin extends Plugin {
 			progress.hide();
 		}
 
-		// Create the pointer note.
+		// Create the pointer note. The ```dicom block renders in every mode.
 		const mdPath = `${DICOM_ROOT}/${finalName}.md`;
 		const content =
 			`---\n` +
@@ -241,8 +301,7 @@ export default class DicomViewerPlugin extends Plugin {
 			`dicom_path: /${destBase}\n` +
 			`---\n\n` +
 			`# ${rawName}\n\n` +
-			`This note points to a DICOM image set. Open it in reading view ` +
-			`to browse the slices.\n`;
+			"```dicom\n```\n";
 		const mdFile = await this.app.vault.create(mdPath, content);
 
 		new Notice(`Imported ${count} files → ${destBase}`);
@@ -366,13 +425,15 @@ const CT_PRESETS: { key: string; name: string; w: number; l: number }[] = [
 // =============================================================================
 // The view
 // =============================================================================
-type DragMode = "none" | "windowing" | "pan";
+type DragMode = "none" | "windowing" | "windowing-overlay" | "pan";
 
 export class DicomRenderer extends Component {
 	private app: App;
 	private host: HTMLElement;
 	private compact: boolean;
 	private sidebarVisible: boolean;
+	private notePath: string | null;
+	private seriesLabels = new Map<string, string>();
 
 	private root!: HTMLDivElement;
 	private sidebar!: HTMLDivElement;
@@ -426,21 +487,22 @@ export class DicomRenderer extends Component {
 	private overlayMatrix: Mat4 | null = null; // primary FoR -> overlay FoR
 	private overlayCache = new Map<number, ResampledPlane>();
 	private volumeCache = new Map<string, Volume>();
-	private overlayOpacity = 0.5;
-	private overlayColormap = "hot";
+	private overlayOpacity = 1.0;
+	private overlayColormap = "gray";
 	private overlayCenter = 0;
 	private overlayWidth = 1;
 
 	constructor(
 		app: App,
 		host: HTMLElement,
-		opts: { compact?: boolean } = {}
+		opts: { compact?: boolean; notePath?: string } = {}
 	) {
 		super();
 		this.app = app;
 		this.host = host;
 		this.compact = !!opts.compact;
 		this.sidebarVisible = !opts.compact; // hidden by default in embeds
+		this.notePath = opts.notePath ?? null;
 	}
 
 	onload() {
@@ -560,7 +622,7 @@ export class DicomRenderer extends Component {
 			this.setOverlay(v === "none" ? null : v);
 		});
 		this.colormapSelect = fl.createEl("select", { cls: "dicom-preset" });
-		(["hot", "cyan", "green", "magenta", "blue", "gray"] as const).forEach(
+		(["gray", "hot", "cyan", "green", "magenta", "blue"] as const).forEach(
 			(c) =>
 				this.colormapSelect.createEl("option", { value: c, text: c })
 		);
@@ -619,6 +681,7 @@ export class DicomRenderer extends Component {
 	async loadFromFolder(folderPath: string, preferSeriesUid?: string) {
 		const token = ++this.loadToken;
 		this.releaseSeries();
+		this.loadSeriesLabels();
 		this.showMessage("Loading series…", "");
 
 		let listing: { files: string[] };
@@ -767,9 +830,13 @@ export class DicomRenderer extends Component {
 				s.frameOfReferenceUID
 			);
 			if (!sameFoR && !registered) continue; // can't align — skip
+			const desc =
+				this.seriesLabels.get(s.seriesUID) ??
+				s.description ??
+				`series ${s.seriesNumber}`;
 			const label =
 				(s.modality ? s.modality + " " : "") +
-				(s.description || `series ${s.seriesNumber}`) +
+				desc +
 				(registered && !sameFoR ? " ⛓" : "");
 			sel.createEl("option", { value: s.seriesUID, text: label });
 		}
@@ -782,6 +849,15 @@ export class DicomRenderer extends Component {
 		this.overlayMatrix = null;
 		this.overlayCache.clear();
 		if (this.fusionSelect) this.fusionSelect.value = "none";
+	}
+
+	/** Flip fusion opacity: 0↔100, 80↔20, etc. (Eclipse Ctrl+A behaviour). */
+	private invertFusionOpacity() {
+		this.overlayOpacity = 1 - this.overlayOpacity;
+		if (this.opacityInput) {
+			this.opacityInput.value = String(Math.round(this.overlayOpacity * 100));
+		}
+		this.draw();
 	}
 
 	private async setOverlay(seriesUid: string | null) {
@@ -826,6 +902,9 @@ export class DicomRenderer extends Component {
 			this.overlaySeriesUid = seriesUid;
 			this.overlayCenter = vol.defaultCenter;
 			this.overlayWidth = vol.defaultWidth;
+			// Default to fully showing the fused-in dataset.
+			this.overlayOpacity = 1.0;
+			if (this.opacityInput) this.opacityInput.value = "100";
 		} catch (e) {
 			this.showMessage("Could not build fusion volume", String(e));
 			return;
@@ -880,6 +959,15 @@ export class DicomRenderer extends Component {
 	}
 
 	// ---- series list UI -------------------------------------------------------
+	private seriesLabel(s: Series): string {
+		const custom = this.seriesLabels.get(s.seriesUID);
+		if (custom) return custom;
+		return (
+			(s.seriesNumber ? `${s.seriesNumber}. ` : "") +
+			(s.description || "(no description)")
+		);
+	}
+
 	private populateSeriesList() {
 		const list = this.seriesListEl;
 		list.empty();
@@ -894,15 +982,88 @@ export class DicomRenderer extends Component {
 				.filter(Boolean)
 				.join(" · ");
 			row.createDiv({ cls: "dicom-series-row-top", text: top });
-			row.createDiv({
+			const desc = row.createDiv({
 				cls: "dicom-series-row-desc",
-				text:
-					(s.seriesNumber ? `${s.seriesNumber}. ` : "") +
-					(s.description || "(no description)"),
+				text: this.seriesLabel(s),
 			});
+			desc.title = "Double-click to rename";
 			this.registerDomEvent(row, "click", () => {
 				if (this.series !== s) this.selectSeries(i);
 			});
+			// Double-click the description to rename (persisted in the note).
+			this.registerDomEvent(desc, "dblclick", (e) => {
+				e.stopPropagation();
+				this.beginEditLabel(s, desc);
+			});
+		});
+	}
+
+	private beginEditLabel(s: Series, descEl: HTMLElement) {
+		const input = createEl("input", {
+			type: "text",
+			cls: "dicom-series-edit",
+			value: this.seriesLabels.get(s.seriesUID) ?? s.description ?? "",
+		});
+		descEl.replaceWith(input);
+		input.focus();
+		input.select();
+		const commit = (save: boolean) => {
+			const val = input.value.trim();
+			if (save) {
+				if (val) this.seriesLabels.set(s.seriesUID, val);
+				else this.seriesLabels.delete(s.seriesUID);
+				this.persistSeriesLabels();
+			}
+			this.populateSeriesList();
+			const idx = this.allSeries.indexOf(this.series as Series);
+			if (idx >= 0) this.highlightSeries(idx);
+			this.updateOverlays();
+		};
+		this.registerDomEvent(input, "keydown", (e: KeyboardEvent) => {
+			if (e.key === "Enter") {
+				e.preventDefault();
+				commit(true);
+			} else if (e.key === "Escape") {
+				e.preventDefault();
+				commit(false);
+			}
+			e.stopPropagation();
+		});
+		this.registerDomEvent(input, "blur", () => commit(true));
+		this.registerDomEvent(input, "click", (e) => e.stopPropagation());
+	}
+
+	/** Read custom series labels from the pointer note's frontmatter. */
+	private loadSeriesLabels() {
+		this.seriesLabels.clear();
+		if (!this.notePath) return;
+		const fm =
+			this.app.metadataCache.getCache(this.notePath)?.frontmatter;
+		const labels = fm?.["dicom_series_labels"];
+		if (labels && typeof labels === "object") {
+			for (const [uid, label] of Object.entries(
+				labels as Record<string, unknown>
+			)) {
+				if (typeof label === "string") this.seriesLabels.set(uid, label);
+			}
+		}
+	}
+
+	/** Persist custom labels into the pointer note's YAML frontmatter. */
+	private persistSeriesLabels() {
+		if (!this.notePath) {
+			new Notice(
+				"Open this set through its DICOM note to save renamed series."
+			);
+			return;
+		}
+		const file = this.app.vault.getAbstractFileByPath(this.notePath);
+		if (!(file instanceof TFile)) return;
+		const obj: Record<string, string> = {};
+		for (const [uid, label] of this.seriesLabels) obj[uid] = label;
+		this.app.fileManager.processFrontMatter(file, (fm) => {
+			if (Object.keys(obj).length) fm["dicom_series_labels"] = obj;
+			else delete fm["dicom_series_labels"];
 		});
 	}
 
@@ -1081,10 +1242,13 @@ export class DicomRenderer extends Component {
 			const ov = this.allSeries.find(
 				(s) => s.seriesUID === this.overlaySeriesUid
 			);
+			const ovDesc = ov
+				? this.seriesLabels.get(ov.seriesUID) ?? ov.description ?? ""
+				: "";
 			bl +=
-				`\nfuse: ${ov?.modality || ""} ${
-					ov?.description || ""
-				} ${Math.round(this.overlayOpacity * 100)}%`.trimEnd();
+				`\nfuse: ${ov?.modality || ""} ${ovDesc} ${Math.round(
+					this.overlayOpacity * 100
+				)}%`.trimEnd();
 		}
 		this.overlayBL.setText(bl);
 		this.syncWLInputs();
@@ -1123,10 +1287,18 @@ export class DicomRenderer extends Component {
 		this.registerDomEvent(el, "mousedown", (e: MouseEvent) => {
 			if (!this.series) return;
 			el.focus();
-			if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
-				this.dragMode = "pan";
+			if (e.button === 1) {
+				this.dragMode = "pan"; // middle button always pans
 			} else if (e.button === 0) {
-				this.dragMode = "windowing";
+				if (e.altKey || e.metaKey) {
+					// Alt / Cmd: window-level the fused-in (overlay) dataset.
+					this.dragMode = "windowing-overlay";
+				} else if (e.ctrlKey || e.shiftKey) {
+					// Ctrl / Shift: pan.
+					this.dragMode = "pan";
+				} else {
+					this.dragMode = "windowing"; // reference dataset
+				}
 			} else {
 				return;
 			}
@@ -1147,6 +1319,12 @@ export class DicomRenderer extends Component {
 				this.windowWidth = Math.max(1, this.windowWidth + dx * step);
 				this.windowCenter += dy * step;
 				this.render();
+			} else if (this.dragMode === "windowing-overlay") {
+				if (!this.overlaySeriesUid) return;
+				const step = Math.max(1, this.overlayWidth / 256);
+				this.overlayWidth = Math.max(1, this.overlayWidth + dx * step);
+				this.overlayCenter += dy * step;
+				this.draw(); // recolours overlay; no resample needed
 			} else if (this.dragMode === "pan") {
 				this.panX += dx;
 				this.panY += dy;
@@ -1167,6 +1345,12 @@ export class DicomRenderer extends Component {
 
 		this.registerDomEvent(el, "keydown", (e: KeyboardEvent) => {
 			if (!this.series) return;
+			// Ctrl/Cmd+A: invert the fusion opacity (Eclipse-style toggle).
+			if ((e.ctrlKey || e.metaKey) && (e.key === "a" || e.key === "A")) {
+				e.preventDefault();
+				this.invertFusionOpacity();
+				return;
+			}
 			switch (e.key) {
 				case "ArrowUp":
 				case "ArrowLeft":
@@ -1393,7 +1577,8 @@ export class DicomRenderChild extends MarkdownRenderChild {
 	constructor(
 		private appRef: App,
 		container: HTMLElement,
-		private folderPath: string
+		private folderPath: string,
+		private notePath?: string
 	) {
 		super(container);
 	}
@@ -1401,6 +1586,7 @@ export class DicomRenderChild extends MarkdownRenderChild {
 	onload() {
 		const renderer = new DicomRenderer(this.appRef, this.containerEl, {
 			compact: true,
+			notePath: this.notePath,
 		});
 		this.addChild(renderer);
 		renderer.loadFromFolder(this.folderPath);

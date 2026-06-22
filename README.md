@@ -87,9 +87,11 @@ folder picker — choose the folder that contains your DICOM slices. The plugin:
    ---
    ```
 
-Opening that note in **reading view** renders the DICOM viewer, pointed at
-`dicom_path`. **Any** note with those two frontmatter keys renders the same way,
-so you can hand-write pointer notes or link to a set from anywhere.
+Generated notes contain a ` ```dicom ` code block, so they render the viewer in
+**reading view, Live Preview, and embeds** alike. Any note with `type: dicom` +
+`dicom_path` in its frontmatter also renders in reading view / embeds even
+without the block. (If a hand-authored note doesn't render in Live Preview, add
+an empty ` ```dicom ` code block to it.)
 
 ### Embedding inline
 
@@ -139,12 +141,26 @@ exact image set it refers to.
   command. This reads the folder straight from disk via the vault adapter, so it
   works even though Obsidian hides files without a recognized extension.
 
-## Window / level (dynamic, in Hounsfield units for CT)
+## Mouse & keyboard
 
-- Left-drag to adjust live (horizontal = width, vertical = center).
-- A toolbar (visible on hover) offers a **preset dropdown** — Soft tissue, Lung,
-  Bone, Brain, Liver, Mediastinum, Angio/PE, plus Default (header) and Full
-  range — and **exact numeric W / L inputs**. CT series show an `HU` label.
+- **Scroll** = change slice. **Ctrl/Cmd + scroll** = zoom (about the cursor).
+- **Left-drag** = window/level the *reference* series.
+- **Alt-drag** (or **Cmd-drag**) = window/level the *fused-in* series.
+- **Ctrl-drag** (or **Shift-drag**, or **middle-drag**) = pan.
+- **Ctrl/Cmd + A** = invert the fusion opacity (0↔100, 80↔20, …), matching
+  Eclipse. Double-click = reset zoom/pan.
+- Arrow keys / PageUp-Down / Home / End also navigate slices.
+
+A toolbar (visible on hover) offers window/level **presets** — Soft tissue, Lung,
+Bone, Brain, Liver, Mediastinum, Angio/PE, plus Default and Full range — and
+**exact numeric W / L inputs**. CT series show an `HU` label.
+
+## Renaming series (persistent)
+
+**Double-click a series name** in the left panel to rename it. The new label is
+saved in the pointer note's frontmatter under `dicom_series_labels` (keyed by
+SeriesInstanceUID) — the `.dcm` files are never modified. Labels are only saved
+when the viewer is opened through a DICOM pointer note (see below).
 
 ## Not yet supported (clearly reported, not silently broken)
 
