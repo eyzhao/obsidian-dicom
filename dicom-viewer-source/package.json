@@ -1,0 +1,28 @@
+{
+  "name": "obsidian-dicom-viewer",
+  "version": "0.5.0",
+  "description": "View DICOM medical image series as scrollable slices inside Obsidian.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+  },
+  "keywords": [
+    "obsidian",
+    "dicom",
+    "medical",
+    "imaging"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "0.20.2",
+    "obsidian": "latest",
+    "typescript": "5.4.5"
+  },
+  "dependencies": {
+    "@cornerstonejs/codec-openjpeg": "^1.3.0",
+    "dicom-parser": "^1.8.21"
+  }
+}
