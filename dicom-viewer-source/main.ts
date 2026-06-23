@@ -573,7 +573,7 @@ export class DicomRenderer extends Component {
 		this.app = app;
 		this.host = host;
 		this.compact = !!opts.compact;
-		this.sidebarVisible = !opts.compact; // hidden by default in embeds
+		this.sidebarVisible = true; // series list shown by default (toggle with ☰)
 		this.notePath = opts.notePath ?? null;
 	}
 
@@ -619,19 +619,23 @@ export class DicomRenderer extends Component {
 
 		// Toolbar
 		const bar = this.stage.createDiv({ cls: "dicom-toolbar" });
-		this.addToolButton(bar, "☰", () => {
+		const row1 = bar.createDiv({ cls: "dicom-toolbar-row" });
+		const row2 = bar.createDiv({ cls: "dicom-toolbar-row" });
+
+		// ---- Row 1: navigation + window/level ----
+		this.addToolButton(row1, "☰", () => {
 			this.sidebarVisible = !this.sidebarVisible;
 			if (this.sidebarVisible) this.sidebar.show();
 			else this.sidebar.hide();
 			this.draw();
 		});
-		this.addToolButton(bar, "Fit", () => {
+		this.addToolButton(row1, "Fit", () => {
 			this.zoom = 1;
 			this.panX = 0;
 			this.panY = 0;
 			this.draw();
 		});
-		this.addToolButton(bar, "Reset W/L", () => {
+		this.addToolButton(row1, "Reset W/L", () => {
 			if (this.current) {
 				this.windowCenter = this.current.defaultCenter;
 				this.windowWidth = this.current.defaultWidth;
@@ -639,12 +643,10 @@ export class DicomRenderer extends Component {
 			}
 		});
 
-		// Window/level: presets + exact numeric entry (dynamic HU control).
-		const sep = bar.createSpan({ cls: "dicom-tool-sep" });
-		sep.setText("│");
+		row1.createSpan({ cls: "dicom-tool-sep", text: "│" });
 
 		// Slice ordering control.
-		this.sortSelect = bar.createEl("select", { cls: "dicom-preset" });
+		this.sortSelect = row1.createEl("select", { cls: "dicom-preset" });
 		(
 			[
 				["position", "Sort: position"],
@@ -659,15 +661,14 @@ export class DicomRenderer extends Component {
 			this.applySort();
 		});
 
-		const sep2 = bar.createSpan({ cls: "dicom-tool-sep" });
-		sep2.setText("│");
+		row1.createSpan({ cls: "dicom-tool-sep", text: "│" });
 
-		this.presetSelect = bar.createEl("select", { cls: "dicom-preset" });
+		this.presetSelect = row1.createEl("select", { cls: "dicom-preset" });
 		this.registerDomEvent(this.presetSelect, "change", () => {
 			this.applyPreset(this.presetSelect.value);
 		});
 
-		const wl = bar.createSpan({ cls: "dicom-wl" });
+		const wl = row1.createSpan({ cls: "dicom-wl" });
 		wl.createSpan({ text: "W" });
 		this.wInput = wl.createEl("input", { type: "number" });
 		wl.createSpan({ text: "L" });
@@ -683,10 +684,8 @@ export class DicomRenderer extends Component {
 		this.registerDomEvent(this.wInput, "change", applyFromInputs);
 		this.registerDomEvent(this.lInput, "change", applyFromInputs);
 
-		// Fusion / co-registration controls.
-		const sep3 = bar.createSpan({ cls: "dicom-tool-sep" });
-		sep3.setText("│");
-		const fl = bar.createSpan({ cls: "dicom-wl" });
+		// ---- Row 2: fusion / co-registration ----
+		const fl = row2.createSpan({ cls: "dicom-wl" });
 		fl.createSpan({ text: "Fuse" });
 		this.fusionSelect = fl.createEl("select", { cls: "dicom-preset" });
 		this.registerDomEvent(this.fusionSelect, "change", () => {
@@ -703,6 +702,7 @@ export class DicomRenderer extends Component {
 			this.overlayColormap = this.colormapSelect.value;
 			this.draw();
 		});
+		fl.createSpan({ text: "opacity" });
 		this.opacityInput = fl.createEl("input", { type: "range" });
 		this.opacityInput.min = "0";
 		this.opacityInput.max = "100";
