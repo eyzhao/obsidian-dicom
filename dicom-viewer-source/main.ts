@@ -101,7 +101,7 @@ export default class DicomViewerPlugin extends Plugin {
 			},
 		});
 
-		// Right-click a folder in the file explorer → "Open as DICOM series".
+		// Right-click a folder in the file explorer → DICOM actions.
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu, file) => {
 				if (file instanceof TFolder) {
@@ -110,6 +110,12 @@ export default class DicomViewerPlugin extends Plugin {
 							.setTitle("Open as DICOM series")
 							.setIcon("scan")
 							.onClick(() => this.openFolderAsSeries(file.path))
+					);
+					menu.addItem((item) =>
+						item
+							.setTitle("Create DICOM note here")
+							.setIcon("file-plus")
+							.onClick(() => this.createPointerNote(file.path))
 					);
 				}
 			})
@@ -155,6 +161,31 @@ export default class DicomViewerPlugin extends Plugin {
 		}
 	}
 
+	/** Generate a correct pointer note for an existing folder of DICOMs. */
+	async createPointerNote(folderPath: string) {
+		const name = folderPath.split("/").pop() || "dicom-set";
+		let mdPath = `${folderPath}.md`;
+		if (this.app.vault.getAbstractFileByPath(mdPath)) {
+			mdPath = `${folderPath} (viewer).md`;
+		}
+		const content =
+			`---\n` +
+			`type: dicom\n` +
+			`dicom_path: /${folderPath}\n` +
+			`---\n\n` +
+			`# ${name}\n\n` +
+			"```dicom\n" +
+			`/${folderPath}\n` +
+			"```\n";
+		try {
+			const f = await this.app.vault.create(mdPath, content);
+			new Notice(`Created ${mdPath}`);
+			await this.app.workspace.getLeaf(true).openFile(f);
+		} catch (e) {
+			new Notice(`Could not create note: ${e}`);
+		}
+	}
+
 	// ---- pointer-note rendering ----------------------------------------------
 	private previewRootOf(el: HTMLElement): HTMLElement | null {
 		return el.closest(
@@ -173,28 +204,21 @@ export default class DicomViewerPlugin extends Plugin {
 		return normalizePath(stripLeadingSlash(String(fm["dicom_path"])));
 	}
 
-	/** ```dicom code block → viewer. Path comes from frontmatter or the block. */
-	private renderDicomCodeBlock(
+	/** ```dicom code block → viewer. Resolves the path from the block body,
+	 * real frontmatter, or (last resort) by scanning the raw note text — so it
+	 * works even when the "frontmatter" was written as a ```yaml block. */
+	private async renderDicomCodeBlock(
 		source: string,
 		el: HTMLElement,
 		ctx: MarkdownPostProcessorContext
 	) {
-		let path = this.dicomPathFromFrontmatter(ctx);
-		if (!path) {
-			// Allow `dicom_path: ...` or a bare path inside the block body.
-			const line = source
-				.split("\n")
-				.map((l) => l.trim())
-				.find((l) => l.length > 0);
-			if (line) {
-				const m = line.match(/^(?:dicom_path|path)\s*:\s*(.+)$/);
-				path = normalizePath(stripLeadingSlash(m ? m[1] : line));
-			}
-		}
+		const path = await this.resolveDicomPath(source, ctx);
 		if (!path) {
 			el.createDiv({
 				cls: "dicom-message",
-				text: "DICOM viewer: no dicom_path in frontmatter or block.",
+				text:
+					"DICOM viewer: couldn't find a dicom_path. Put the folder " +
+					"path inside the ```dicom block or in the note's frontmatter.",
 			});
 			return;
 		}
@@ -207,6 +231,51 @@ export default class DicomViewerPlugin extends Plugin {
 				(isEmbed ? "dicom-embed-host" : "dicom-fullpage-host"),
 		});
 		ctx.addChild(new DicomRenderChild(this.app, host, path, ctx.sourcePath));
+	}
+
+	private async resolveDicomPath(
+		source: string,
+		ctx: MarkdownPostProcessorContext
+	): Promise<string | null> {
+		const clean = (raw: string) =>
+			normalizePath(
+				stripLeadingSlash(
+					raw
+						.trim()
+						.replace(/^["']|["']$/g, "")
+						.replace(/\s+#.*$/, "")
+						.trim()
+				)
+			);
+
+		// 1) Path written inside the ```dicom block.
+		const bodyLine = source
+			.split("\n")
+			.map((l) => l.trim())
+			.find((l) => l.length > 0);
+		if (bodyLine) {
+			const m = bodyLine.match(/^(?:dicom_path|path)\s*:\s*(.+)$/i);
+			const raw = m ? m[1] : bodyLine;
+			if (raw) return clean(raw);
+		}
+
+		// 2) Real YAML frontmatter.
+		const fmPath = this.dicomPathFromFrontmatter(ctx);
+		if (fmPath) return fmPath;
+
+		// 3) Last resort: scan the raw note text for a dicom_path: line. This
+		//    rescues notes whose "frontmatter" was written as a ```yaml block.
+		const f = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
+		if (f instanceof TFile) {
+			try {
+				const text = await this.app.vault.cachedRead(f);
+				const m = text.match(/dicom_path\s*:\s*(.+)/i);
+				if (m) return clean(m[1]);
+			} catch {
+				/* ignore */
+			}
+		}
+		return null;
 	}
 
 	private renderDicomPointer(
@@ -293,7 +362,8 @@ export default class DicomViewerPlugin extends Plugin {
 			progress.hide();
 		}
 
-		// Create the pointer note. The ```dicom block renders in every mode.
+		// Create the pointer note. The path lives inside the ```dicom block so
+		// rendering never depends on frontmatter being parsed correctly.
 		const mdPath = `${DICOM_ROOT}/${finalName}.md`;
 		const content =
 			`---\n` +
@@ -301,7 +371,9 @@ export default class DicomViewerPlugin extends Plugin {
 			`dicom_path: /${destBase}\n` +
 			`---\n\n` +
 			`# ${rawName}\n\n` +
-			"```dicom\n```\n";
+			"```dicom\n" +
+			`/${destBase}\n` +
+			"```\n";
 		const mdFile = await this.app.vault.create(mdPath, content);
 
 		new Notice(`Imported ${count} files → ${destBase}`);

@@ -78,14 +78,24 @@ folder picker — choose the folder that contains your DICOM slices. The plugin:
 1. Prompts for a **name** for the set.
 2. Copies the entire folder into `DICOM/files/[name]/` inside your vault. On a
    name collision it appends `-1`, `-2`, … and tells you the name it used.
-3. Creates a pointer note `DICOM/[name].md` with this frontmatter:
+3. Creates a pointer note `DICOM/[name].md` that looks like this:
 
-   ```yaml
-   ---
-   type: dicom
-   dicom_path: /DICOM/files/[name]
-   ---
-   ```
+       ---
+       type: dicom
+       dicom_path: /DICOM/files/[name]
+       ---
+
+       # [name]
+
+       ```dicom
+       /DICOM/files/[name]
+       ```
+
+   The path lives **inside the `dicom` code block**, so the viewer renders even
+   if the YAML frontmatter isn't parsed. (Don't wrap the frontmatter in a
+   ```​yaml fence — use real `---` delimiters, or just rely on the code block.)
+   To make a pointer note for a folder you already have, right-click the folder →
+   **Create DICOM note here**.
 
 Generated notes contain a ` ```dicom ` code block, so they render the viewer in
 **reading view, Live Preview, and embeds** alike. Any note with `type: dicom` +
