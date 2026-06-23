@@ -26,6 +26,34 @@ runtime downloads, web workers, or WASM codecs** to bundle.
 
  
 
+## RT structure sets (RTSTRUCT)
+
+If an `RTSTRUCT` object is in the folder, its structures are overlaid as coloured
+contours on whichever slice you're viewing — and, because contours are
+transformed through the registration, they draw correctly on a **fused** series
+too (e.g. structures defined on the planning CT shown on a co-registered MR).
+
+A **Structures** panel appears under the Series list, grouped by RT interpreted
+type into **Targets, Organs, External, Avoidance,** and **Other**. Each category
+header has a checkbox that selects/deselects every structure in it, and each
+structure has its own checkbox and colour swatch. Categories collapse by
+clicking their header.
+
+### Limiting which structures appear
+
+To cut the clutter of opt/ref planning structures, list the ones you want inside
+the `dicom` code block. Only those appear in the panel (and they're shown by
+default):
+
+    ```dicom
+    /DICOM/files/Grade 3 Meningioma
+    structures: PTVp_6000, GTVp1, Brainstem, Chiasm
+    ```
+
+Names match the ROI names case-insensitively. You can also write them as a
+bulleted list (`- PTVp_6000`). Without a `structures:` line, every structure is
+available and none are shown until you tick them.
+
 ## Co-registration & image fusion
 
 If a DICOM **Spatial Registration** object (modality `REG`) is present in the
@@ -156,7 +184,7 @@ exact image set it refers to.
 - **Scroll** = change slice. **Ctrl/Cmd + scroll** = zoom (about the cursor).
 - **Left-drag** = window/level the *reference* series.
 - **Alt-drag** (or **Cmd-drag**) = window/level the *fused-in* series.
-- **Ctrl-drag** (or **Shift-drag**, or **middle-drag**) = pan.
+- **Shift-drag** (or **middle-drag**) = pan.
 - **Ctrl/Cmd + A** = invert the fusion opacity (0↔100, 80↔20, …), matching
   Eclipse. Double-click = reset zoom/pan.
 - Arrow keys / PageUp-Down / Home / End also navigate slices.

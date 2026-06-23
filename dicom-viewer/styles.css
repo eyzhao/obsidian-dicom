@@ -25,7 +25,51 @@
   color: var(--text-muted, #888);
   border-bottom: 1px solid var(--background-modifier-border, #2a2a2e);
 }
-.dicom-series-list { overflow-y: auto; flex: 1; }
+.dicom-series-list { overflow-y: auto; flex: 0 1 auto; max-height: 42%; }
+.dicom-struct-list { overflow-y: auto; flex: 1 1 auto; min-height: 60px; }
+.dicom-struct-empty { padding: 8px 10px; color: var(--text-faint, #555); font-size: 12px; }
+
+.dicom-struct-cat { border-bottom: 1px solid var(--background-modifier-border, #232327); }
+.dicom-struct-cat-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  cursor: pointer;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted, #9aa);
+  user-select: none;
+}
+.dicom-struct-cat-header:hover { background: var(--background-modifier-hover, rgba(255,255,255,0.04)); }
+.dicom-struct-caret { width: 10px; display: inline-block; }
+.dicom-struct-cat-name { flex: 1; }
+.dicom-struct-cat-body.is-collapsed { display: none; }
+
+.dicom-struct-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 2px 18px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.dicom-struct-row:hover { background: var(--background-modifier-hover, rgba(255,255,255,0.05)); }
+.dicom-struct-swatch {
+  width: 11px; height: 11px;
+  border-radius: 2px;
+  border: 1px solid rgba(255,255,255,0.4);
+  flex: 0 0 auto;
+}
+.dicom-struct-name {
+  color: var(--text-normal, #ddd);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dicom-struct-row input,
+.dicom-struct-all { flex: 0 0 auto; margin: 0; }
 .dicom-series-row {
   padding: 7px 10px;
   cursor: pointer;
@@ -186,9 +230,13 @@
   background: #000;
   contain: strict;
 }
-.dicom-fullpage-host { height: min(75vh, 900px); min-height: 380px; }
-.dicom-embed-host { height: 460px; }
+.dicom-fullpage-host { height: min(80vh, 1000px); min-height: 420px; }
+.dicom-embed-host { height: 640px; }
 .dicom-render-host .dicom-view-container { height: 100%; }
+/* Let the embedded viewer use the full pane width, not the readable-line width. */
+.markdown-preview-view .dicom-render-host,
+.markdown-rendered .dicom-render-host { width: 100%; }
+.markdown-preview-sizer:has(.dicom-render-host) { max-width: none !important; }
 
 /* Compact (embedded) mode: slimmer chrome, sidebar hidden by default */
 .dicom-compact .dicom-sidebar { flex-basis: 170px; }

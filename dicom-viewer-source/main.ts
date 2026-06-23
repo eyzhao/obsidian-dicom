@@ -53,6 +53,15 @@ import {
 	ResampledPlane,
 	Volume,
 } from "./src/volume";
+import {
+	CATEGORY_ORDER,
+	isRTStructSOP,
+	parseRTStruct,
+	ROI,
+	RTStruct,
+	StructureCategory,
+} from "./src/rtstruct";
+import { buildSliceFrame, contourOnSlice } from "./src/contour";
 
 export const VIEW_TYPE_DICOM = "dicom-view";
 const DICOM_EXTENSIONS = ["dcm", "dicom", "ima", "img"];
@@ -230,7 +239,16 @@ export default class DicomViewerPlugin extends Plugin {
 				"dicom-render-host " +
 				(isEmbed ? "dicom-embed-host" : "dicom-fullpage-host"),
 		});
-		ctx.addChild(new DicomRenderChild(this.app, host, path, ctx.sourcePath));
+		const structures = parseStructureFilter(source);
+		ctx.addChild(
+			new DicomRenderChild(
+				this.app,
+				host,
+				path,
+				ctx.sourcePath,
+				structures ?? undefined
+			)
+		);
 	}
 
 	private async resolveDicomPath(
@@ -428,6 +446,31 @@ function stripLeadingSlash(p: string): string {
 	return p.replace(/^\/+/, "");
 }
 
+/**
+ * Parse an optional structure allow-list from the ```dicom block, e.g.:
+ *   structures: PTVp_6000, Brainstem, Chiasm
+ * or as a bullet list with "- name" lines. Returns null if none specified.
+ */
+function parseStructureFilter(source: string): string[] | null {
+	const names: string[] = [];
+	for (const line of source.split("\n")) {
+		const t = line.trim();
+		const m = t.match(/^(?:structures|structure|rois?|contours?)\s*:\s*(.+)$/i);
+		if (m) {
+			names.push(
+				...m[1]
+					.split(",")
+					.map((x) => x.trim())
+					.filter(Boolean)
+			);
+			continue;
+		}
+		const b = t.match(/^[-*]\s+(.+)$/);
+		if (b) names.push(b[1].trim());
+	}
+	return names.length ? names : null;
+}
+
 function sanitizeName(name: string): string {
 	const cleaned = name
 		.replace(/[\\/:*?"<>|#^[\]]/g, "-")
@@ -564,10 +607,23 @@ export class DicomRenderer extends Component {
 	private overlayCenter = 0;
 	private overlayWidth = 1;
 
+	// ---- RT structures ----
+	private structListEl!: HTMLDivElement;
+	private rtStructs: RTStruct[] = [];
+	private structMatrices: (Mat4 | null)[] = []; // per struct: structFoR -> primary FoR
+	private flatROIs: { id: string; structIdx: number; roi: ROI }[] = [];
+	private visibleROIs = new Set<string>();
+	private allowedStructures: string[] | null;
+	private sliceThickness = 2;
+
 	constructor(
 		app: App,
 		host: HTMLElement,
-		opts: { compact?: boolean; notePath?: string } = {}
+		opts: {
+			compact?: boolean;
+			notePath?: string;
+			allowedStructures?: string[];
+		} = {}
 	) {
 		super();
 		this.app = app;
@@ -575,6 +631,7 @@ export class DicomRenderer extends Component {
 		this.compact = !!opts.compact;
 		this.sidebarVisible = true; // series list shown by default (toggle with ☰)
 		this.notePath = opts.notePath ?? null;
+		this.allowedStructures = opts.allowedStructures ?? null;
 	}
 
 	onload() {
@@ -601,6 +658,13 @@ export class DicomRenderer extends Component {
 		this.sidebar.createDiv({ cls: "dicom-sidebar-title", text: "Series" });
 		this.seriesListEl = this.sidebar.createDiv({
 			cls: "dicom-series-list",
+		});
+		this.sidebar.createDiv({
+			cls: "dicom-sidebar-title",
+			text: "Structures",
+		});
+		this.structListEl = this.sidebar.createDiv({
+			cls: "dicom-struct-list",
 		});
 		if (!this.sidebarVisible) this.sidebar.hide();
 
@@ -781,8 +845,9 @@ export class DicomRenderer extends Component {
 			}
 		});
 
-		// Collect spatial registration objects so series can be fused.
+		// Collect spatial registration objects and RT structure sets.
 		this.registry = new RegistrationRegistry();
+		this.rtStructs = [];
 		for (const pf of parsed) {
 			const sop = sopClassOf(pf.dataSet);
 			if (isRegistrationSOP(sop)) {
@@ -791,8 +856,15 @@ export class DicomRenderer extends Component {
 				} catch (e) {
 					console.warn("DICOM Viewer: bad REG object", e);
 				}
+			} else if (isRTStructSOP(sop)) {
+				try {
+					this.rtStructs.push(parseRTStruct(pf.dataSet));
+				} catch (e) {
+					console.warn("DICOM Viewer: bad RTSTRUCT object", e);
+				}
 			}
 		}
+		this.buildFlatROIs();
 
 		await this.displaySeries(parsed, preferSeriesUid, token);
 	}
@@ -882,6 +954,7 @@ export class DicomRenderer extends Component {
 		this.populatePresets();
 		this.resetOverlay();
 		this.populateFusionOptions();
+		this.prepareStructures(chosen);
 		this.render();
 	}
 
@@ -1028,6 +1101,163 @@ export class DicomRenderer extends Component {
 		if (this.overlayCache.size > DECODE_CACHE_SIZE) this.overlayCache.clear();
 		this.overlayCache.set(this.sliceIndex, plane);
 		return plane;
+	}
+
+	// ---- RT structures --------------------------------------------------------
+	private buildFlatROIs() {
+		this.flatROIs = [];
+		const allowed = this.allowedStructures
+			? new Set(this.allowedStructures.map((n) => n.toLowerCase().trim()))
+			: null;
+		this.rtStructs.forEach((rt, si) => {
+			rt.rois.forEach((roi) => {
+				if (allowed && !allowed.has(roi.name.toLowerCase().trim()))
+					return;
+				this.flatROIs.push({
+					id: `s${si}_r${roi.number}`,
+					structIdx: si,
+					roi,
+				});
+			});
+		});
+		this.visibleROIs.clear();
+		// If the note curated a structure list, show those by default.
+		if (allowed) for (const f of this.flatROIs) this.visibleROIs.add(f.id);
+	}
+
+	/** Compute structFoR→primaryFoR matrices and the slice thickness. */
+	private prepareStructures(primary: Series) {
+		const primaryFoR = primary.frameOfReferenceUID;
+		this.structMatrices = this.rtStructs.map((rt) =>
+			this.registry.transform(rt.frameOfReferenceUID, primaryFoR)
+		);
+		const sl = primary.slices;
+		if (sl.length > 1 && sl[0].position && sl[1].position) {
+			const a = sl[0].position,
+				b = sl[1].position;
+			this.sliceThickness =
+				Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) || 2;
+		} else {
+			this.sliceThickness = 2;
+		}
+		this.buildStructureSelector();
+	}
+
+	private buildStructureSelector() {
+		const el = this.structListEl;
+		if (!el) return;
+		el.empty();
+		if (this.flatROIs.length === 0) {
+			el.createDiv({ cls: "dicom-struct-empty", text: "—" });
+			return;
+		}
+		for (const cat of CATEGORY_ORDER) {
+			const items = this.flatROIs.filter((f) => f.roi.category === cat);
+			if (!items.length) continue;
+			const catEl = el.createDiv({ cls: "dicom-struct-cat" });
+			const header = catEl.createDiv({ cls: "dicom-struct-cat-header" });
+			const caret = header.createSpan({
+				cls: "dicom-struct-caret",
+				text: "▾",
+			});
+			const allCb = header.createEl("input", { type: "checkbox" });
+			allCb.addClass("dicom-struct-all");
+			header.createSpan({
+				cls: "dicom-struct-cat-name",
+				text: `${cat} (${items.length})`,
+			});
+			const body = catEl.createDiv({ cls: "dicom-struct-cat-body" });
+
+			this.registerDomEvent(header, "click", (e) => {
+				if (e.target === allCb) return;
+				const collapsed = body.hasClass("is-collapsed");
+				body.toggleClass("is-collapsed", !collapsed);
+				caret.setText(collapsed ? "▾" : "▸");
+			});
+			this.registerDomEvent(allCb, "change", () => {
+				for (const f of items) {
+					if (allCb.checked) this.visibleROIs.add(f.id);
+					else this.visibleROIs.delete(f.id);
+				}
+				this.buildStructureSelector();
+				this.draw();
+			});
+
+			const updateAll = () => {
+				const vis = items.filter((f) =>
+					this.visibleROIs.has(f.id)
+				).length;
+				allCb.checked = vis === items.length;
+				allCb.indeterminate = vis > 0 && vis < items.length;
+			};
+
+			for (const f of items) {
+				const row = body.createDiv({ cls: "dicom-struct-row" });
+				const sw = row.createSpan({ cls: "dicom-struct-swatch" });
+				sw.style.background = `rgb(${f.roi.color.join(",")})`;
+				const cb = row.createEl("input", { type: "checkbox" });
+				cb.checked = this.visibleROIs.has(f.id);
+				row.createSpan({ cls: "dicom-struct-name", text: f.roi.name });
+				const toggle = () => {
+					if (cb.checked) this.visibleROIs.add(f.id);
+					else this.visibleROIs.delete(f.id);
+					updateAll();
+					this.draw();
+				};
+				this.registerDomEvent(cb, "change", toggle);
+				this.registerDomEvent(row, "click", (e) => {
+					if (e.target === cb) return;
+					cb.checked = !cb.checked;
+					toggle();
+				});
+			}
+			updateAll();
+		}
+	}
+
+	/** Draw the visible structures' contours that intersect the current slice. */
+	private drawStructures(ox: number, oy: number, scale: number) {
+		if (!this.flatROIs.length || !this.series || !this.current) return;
+		const ref = this.series.slices[this.sliceIndex];
+		if (!ref.position || !ref.orientation) return;
+		const anyVisible = this.flatROIs.some((f) =>
+			this.visibleROIs.has(f.id)
+		);
+		if (!anyVisible) return;
+
+		const ps = this.current.pixelSpacing ?? [1, 1];
+		const frame = buildSliceFrame(
+			ref.position,
+			ref.orientation.slice(0, 3),
+			ref.orientation.slice(3, 6),
+			ps[0],
+			ps[1],
+			Math.max(this.sliceThickness / 2, 0.6)
+		);
+		const ctx = this.ctx;
+		ctx.save();
+		ctx.lineWidth = 1.6;
+		ctx.lineJoin = "round";
+		for (const f of this.flatROIs) {
+			if (!this.visibleROIs.has(f.id)) continue;
+			const M = this.structMatrices[f.structIdx];
+			if (!M) continue;
+			ctx.strokeStyle = `rgb(${f.roi.color.join(",")})`;
+			for (const c of f.roi.contours) {
+				const poly = contourOnSlice(c.points, M, frame);
+				if (!poly) continue;
+				ctx.beginPath();
+				for (let k = 0; k < poly.length; k += 2) {
+					const X = ox + poly[k] * scale;
+					const Y = oy + poly[k + 1] * scale;
+					if (k === 0) ctx.moveTo(X, Y);
+					else ctx.lineTo(X, Y);
+				}
+				if (c.geometricType.includes("CLOSED")) ctx.closePath();
+				ctx.stroke();
+			}
+		}
+		ctx.restore();
 	}
 
 	// ---- series list UI -------------------------------------------------------
@@ -1250,6 +1480,9 @@ export class DicomRenderer extends Component {
 			ctx.drawImage(this.overlayCanvas, ox, oy, drawW, drawH);
 		}
 
+		// RT structure contours.
+		this.drawStructures(ox, oy, scale);
+
 		this.updateOverlays();
 	}
 
@@ -1365,8 +1598,8 @@ export class DicomRenderer extends Component {
 				if (e.altKey || e.metaKey) {
 					// Alt / Cmd: window-level the fused-in (overlay) dataset.
 					this.dragMode = "windowing-overlay";
-				} else if (e.ctrlKey || e.shiftKey) {
-					// Ctrl / Shift: pan.
+				} else if (e.shiftKey) {
+					// Shift: pan.
 					this.dragMode = "pan";
 				} else {
 					this.dragMode = "windowing"; // reference dataset
@@ -1650,7 +1883,8 @@ export class DicomRenderChild extends MarkdownRenderChild {
 		private appRef: App,
 		container: HTMLElement,
 		private folderPath: string,
-		private notePath?: string
+		private notePath?: string,
+		private allowedStructures?: string[]
 	) {
 		super(container);
 	}
@@ -1659,6 +1893,7 @@ export class DicomRenderChild extends MarkdownRenderChild {
 		const renderer = new DicomRenderer(this.appRef, this.containerEl, {
 			compact: true,
 			notePath: this.notePath,
+			allowedStructures: this.allowedStructures,
 		});
 		this.addChild(renderer);
 		renderer.loadFromFolder(this.folderPath);
